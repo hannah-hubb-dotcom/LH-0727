@@ -13,5 +13,3 @@ sum_numbers = number1 + number2
 
 # 결과 표시
 st.write(f"두 숫자의 합계는: {sum_numbers}")
-
-st.write("--- (이 코드를 `app.py`라는 이름으로 저장해야 합니다.) ---")
