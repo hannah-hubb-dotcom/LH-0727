@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 DATA_DIR = Path(__file__).parent / "data"
-ACCESSIBILITY_PATH = DATA_DIR / "gwanak_grid_accessibility.geojson"
+ACCESSIBILITY_PATH = DATA_DIR / "gwanak_residential_grid_accessibility.geojson"
 
 
 @st.cache_data
