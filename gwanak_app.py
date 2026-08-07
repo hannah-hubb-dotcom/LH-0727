@@ -3,7 +3,6 @@ import json
 
 import geopandas as gpd
 import networkx as nx
-import pandas as pd
 import streamlit as st
 import folium
 
@@ -22,7 +21,6 @@ DATA_DIR = Path(__file__).parent / "data"
 
 BUILDING_PATH = DATA_DIR / "gwanak_residential_buildings.geojson"
 PARK_PATH = DATA_DIR / "gwanak_parks.geojson"
-PARK_NODE_PATH = DATA_DIR / "gwanak_park_network_nodes.csv"
 GRAPH_PATH = DATA_DIR / "gwanak_walk_network.graphml"
 BOUNDARY_PATH = DATA_DIR / "gwanak_boundary.geojson"
 
@@ -94,28 +92,58 @@ def load_network():
     return graph, network_nodes
 
 
-@st.cache_data
-def load_park_nodes():
-    park_nodes = pd.read_csv(PARK_NODE_PATH)
+def load_park_nodes(parks, network_nodes):
+    parks_copy = parks.copy()
+
+    parks_copy["park_name"] = (
+        parks_copy["LABEL"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    parks_copy = parks_copy[
+        parks_copy["park_name"] != ""
+    ].copy()
+
+    # 공원 폴리곤의 대표점 생성
+    parks_copy["geometry"] = (
+        parks_copy.geometry.representative_point()
+    )
+
+    parks_metric = parks_copy[
+        ["park_name", "geometry"]
+    ].to_crs(5186)
+
+    nodes_metric = network_nodes[
+        ["node_id", "geometry"]
+    ].to_crs(5186)
+
+    # 공원 대표점을 전체 보행 네트워크에 연결
+    park_nodes = gpd.sjoin_nearest(
+        parks_metric,
+        nodes_metric,
+        how="left",
+        distance_col="park_snap_distance_m"
+    )
+
+    if "index_right" in park_nodes.columns:
+        park_nodes = park_nodes.drop(
+            columns=["index_right"]
+        )
 
     park_nodes["node_id"] = (
         park_nodes["node_id"]
         .map(clean_id)
     )
 
-    park_nodes["park_name"] = (
-        park_nodes["LABEL"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    park_nodes.loc[
-        park_nodes["park_name"].isin(["", "nan", "None"]),
-        "park_name"
-    ] = park_nodes["park_id"].astype(str)
-
-    return park_nodes
+    return park_nodes[
+        [
+            "park_name",
+            "node_id",
+            "park_snap_distance_m"
+        ]
+    ]
 
 
 def add_geojson_layer(
@@ -158,7 +186,9 @@ def find_nearest_building(
 
     nearest = gpd.sjoin_nearest(
         clicked_point,
-        buildings_metric[["building_id", "geometry"]],
+        buildings_metric[
+            ["building_id", "geometry"]
+        ],
         how="left",
         distance_col="distance_m"
     )
@@ -289,7 +319,9 @@ def calculate_accessibility(
 
     snapped = gpd.sjoin_nearest(
         building_metric,
-        nodes_metric[["node_id", "geometry"]],
+        nodes_metric[
+            ["node_id", "geometry"]
+        ],
         how="left",
         distance_col="snap_distance_m"
     )
@@ -302,6 +334,7 @@ def calculate_accessibility(
         snapped.iloc[0]["snap_distance_m"]
     )
 
+    # 15분 = 1,125m
     distances = nx.single_source_dijkstra_path_length(
         graph,
         source=source_node,
@@ -311,18 +344,13 @@ def calculate_accessibility(
 
     reachable_node_ids = set(distances.keys())
 
-    reachable_nodes = network_nodes[
-        network_nodes["node_id"].isin(
-            reachable_node_ids
-        )
-    ].copy()
-
     reachable_lines = create_network_lines(
         graph,
         network_nodes,
         reachable_node_ids
     )
 
+    # 실제 도달 가능한 보행로 주변 35m를 영역으로 표현
     if len(reachable_lines) > 0:
         lines_metric = reachable_lines.to_crs(5186)
 
@@ -340,6 +368,7 @@ def calculate_accessibility(
     else:
         service_area = None
 
+    # 현재 그래프에 연결된 공원만 사용
     park_nodes = park_nodes[
         park_nodes["node_id"].isin(
             set(graph.nodes)
@@ -358,6 +387,7 @@ def calculate_accessibility(
         reachable_parks["walking_distance_m"] <= 1125
     ]
 
+    # 같은 공원명은 하나로 계산
     reachable_parks = (
         reachable_parks
         .sort_values("walking_distance_m")
@@ -390,7 +420,12 @@ def calculate_accessibility(
 try:
     buildings, parks, boundary = load_geodata()
     graph, network_nodes = load_network()
-    park_nodes = load_park_nodes()
+
+    # 기존 CSV 대신 현재 전체 그래프에 공원 재연결
+    park_nodes = load_park_nodes(
+        parks,
+        network_nodes
+    )
 
 except Exception as error:
     st.error("데이터를 불러오지 못했습니다.")
@@ -500,11 +535,16 @@ if accessibility is not None:
         weight=3
     )
 
+    reachable_parks = accessibility[
+        "reachable_parks"
+    ]
+
     accessible_names = set(
-        accessibility["reachable_parks"]["park_name"]
+        reachable_parks["park_name"]
     )
 
     if "LABEL" in parks.columns:
+
         parks_display = parks.copy()
 
         parks_display["_park_name"] = (
@@ -543,10 +583,6 @@ if accessibility is not None:
         weight=3,
         fill_opacity=0
     )
-
-    reachable_parks = accessibility[
-        "reachable_parks"
-    ]
 
     for _, park in reachable_parks.iterrows():
 
@@ -593,7 +629,7 @@ if accessibility is not None:
         add_geojson_layer(
             map_object,
             route,
-            "가장 가까운 공원까지의 경로",
+            "가장 가까운 공원까지의 보행 경로",
             color="#d94801",
             weight=6,
             fill_opacity=0
