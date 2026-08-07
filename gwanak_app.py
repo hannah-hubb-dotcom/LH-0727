@@ -27,6 +27,17 @@ GRAPH_PATH = DATA_DIR / "gwanak_walk_network.graphml"
 BOUNDARY_PATH = DATA_DIR / "gwanak_boundary.geojson"
 
 
+# 대표 아파트 위치
+# 지도에서 해당 위치와 가장 가까운 주거용 건물을 자동으로 선택
+FEATURED_APARTMENTS = {
+    "관악푸르지오": (37.4885, 126.9470),
+    "서울대입구삼성아파트": (37.4785, 126.9525),
+    "신림주공1단지": (37.4670, 126.9215),
+    "봉천두산아파트": (37.4835, 126.9435),
+    "관악드림타운": (37.4840, 126.9400),
+}
+
+
 def clean_id(value):
     value = str(value)
 
@@ -75,7 +86,7 @@ def load_network():
         except:
             pass
 
-    network_nodes = gpd.GeoDataFrame(
+    nodes = gpd.GeoDataFrame(
         node_rows,
         geometry=[
             Point(row["x"], row["y"])
@@ -84,7 +95,7 @@ def load_network():
         crs=4326
     )
 
-    return graph, network_nodes
+    return graph, nodes
 
 
 @st.cache_data
@@ -111,59 +122,52 @@ def load_park_nodes():
     return park_nodes
 
 
-def geojson_data(data):
-    return json.loads(data.to_json())
-
-
-def add_geojson_layer(
+def add_layer(
     map_object,
     data,
     name,
     color,
     fill_color=None,
-    fill_opacity=0.35,
+    fill_opacity=0.3,
     weight=2
 ):
     if data is None or len(data) == 0:
         return
 
     folium.GeoJson(
-        geojson_data(data),
+        json.loads(data.to_json()),
         name=name,
         style_function=lambda feature: {
             "color": color,
             "weight": weight,
             "fillColor": fill_color or color,
             "fillOpacity": fill_opacity
-        },
-        show=True
+        }
     ).add_to(map_object)
 
 
 def find_nearest_building(
     buildings,
-    clicked_lat,
-    clicked_lon
+    latitude,
+    longitude
 ):
     buildings_metric = buildings.to_crs(5186)
 
-    clicked_point = gpd.GeoDataFrame(
+    clicked = gpd.GeoDataFrame(
         geometry=[
-            Point(clicked_lon, clicked_lat)
+            Point(longitude, latitude)
         ],
         crs=4326
     ).to_crs(5186)
 
-    joined = gpd.sjoin_nearest(
-        clicked_point,
-        buildings_metric[
-            ["building_id", "geometry"]
-        ],
+    result = gpd.sjoin_nearest(
+        clicked,
+        buildings_metric[["building_id", "geometry"]],
         how="left",
         distance_col="distance_m"
     )
 
-    building_id = joined.iloc[0]["building_id"]
+    building_id = result.iloc[0]["building_id"]
 
     return buildings[
         buildings["building_id"] == building_id
@@ -173,7 +177,7 @@ def find_nearest_building(
 def make_network_lines(
     graph,
     network_nodes,
-    reachable_ids
+    reachable_nodes
 ):
     node_geometry = (
         network_nodes
@@ -181,34 +185,32 @@ def make_network_lines(
         .to_dict()
     )
 
-    edge_rows = []
+    lines = []
 
-    for u, v in graph.edges():
-        u = clean_id(u)
-        v = clean_id(v)
+    for start, end in graph.edges():
+        start = clean_id(start)
+        end = clean_id(end)
 
-        if u not in reachable_ids:
+        if start not in reachable_nodes:
             continue
 
-        if v not in reachable_ids:
+        if end not in reachable_nodes:
             continue
 
-        if u not in node_geometry:
+        if start not in node_geometry:
             continue
 
-        if v not in node_geometry:
+        if end not in node_geometry:
             continue
 
-        edge_rows.append({
-            "from_node": u,
-            "to_node": v,
+        lines.append({
             "geometry": LineString([
-                node_geometry[u],
-                node_geometry[v]
+                node_geometry[start],
+                node_geometry[end]
             ])
         })
 
-    if len(edge_rows) == 0:
+    if len(lines) == 0:
         return gpd.GeoDataFrame(
             {"geometry": []},
             geometry="geometry",
@@ -216,7 +218,7 @@ def make_network_lines(
         )
 
     return gpd.GeoDataFrame(
-        edge_rows,
+        lines,
         geometry="geometry",
         crs=4326
     )
@@ -248,14 +250,14 @@ def make_route(
         .to_dict()
     )
 
-    route_lines = []
+    lines = []
 
     for start, end in zip(
         route_nodes[:-1],
         route_nodes[1:]
     ):
         if start in node_geometry and end in node_geometry:
-            route_lines.append(
+            lines.append(
                 LineString([
                     node_geometry[start],
                     node_geometry[end]
@@ -263,7 +265,7 @@ def make_route(
             )
 
     return gpd.GeoDataFrame(
-        {"geometry": route_lines},
+        {"geometry": lines},
         geometry="geometry",
         crs=4326
     )
@@ -286,9 +288,7 @@ def calculate_accessibility(
 
     snapped = gpd.sjoin_nearest(
         building_metric,
-        nodes_metric[
-            ["node_id", "geometry"]
-        ],
+        nodes_metric[["node_id", "geometry"]],
         how="left",
         distance_col="snap_distance_m"
     )
@@ -309,25 +309,31 @@ def calculate_accessibility(
         weight="length"
     )
 
-    reachable_ids = set(distances.keys())
+    reachable_node_ids = set(distances.keys())
 
     reachable_nodes = network_nodes[
-        network_nodes["node_id"].isin(reachable_ids)
+        network_nodes["node_id"].isin(
+            reachable_node_ids
+        )
     ].copy()
 
     reachable_links = make_network_lines(
         graph,
         network_nodes,
-        reachable_ids
+        reachable_node_ids
     )
 
     service_area = None
 
     if len(reachable_nodes) >= 3:
-        service_area = reachable_nodes.geometry.unary_union.convex_hull
-
         service_area = gpd.GeoDataFrame(
-            {"geometry": [service_area]},
+            {
+                "geometry": [
+                    reachable_nodes.geometry
+                    .unary_union
+                    .convex_hull
+                ]
+            },
             geometry="geometry",
             crs=4326
         )
@@ -350,6 +356,7 @@ def calculate_accessibility(
         reachable_parks["walking_distance_m"] <= 1125
     ]
 
+    # 같은 공원명은 하나로 계산
     reachable_parks = (
         reachable_parks
         .sort_values("walking_distance_m")
@@ -395,10 +402,37 @@ except Exception as error:
 st.title("🌳 관악구 15분 공원 생활권 분석")
 
 st.write(
-    "지도에서 주거용 건물을 클릭하면 "
-    "해당 건물의 15분 보행 가능 영역과 "
-    "접근 가능한 공원을 확인할 수 있습니다."
+    "아파트를 선택하거나 지도에서 건물을 클릭하면 "
+    "해당 위치의 15분 공원 접근성을 확인할 수 있습니다."
 )
+
+
+# 아파트 바로가기
+st.sidebar.header("아파트 바로가기")
+
+apartment_options = [
+    "지도에서 직접 선택"
+] + list(FEATURED_APARTMENTS.keys())
+
+selected_apartment = st.sidebar.selectbox(
+    "분석할 아파트를 선택하세요",
+    apartment_options
+)
+
+if selected_apartment != "지도에서 직접 선택":
+    apartment_lat, apartment_lon = (
+        FEATURED_APARTMENTS[selected_apartment]
+    )
+
+    apartment_building = find_nearest_building(
+        buildings,
+        apartment_lat,
+        apartment_lon
+    )
+
+    st.session_state.selected_building_id = (
+        apartment_building["building_id"]
+    )
 
 
 if "selected_building_id" not in st.session_state:
@@ -434,8 +468,8 @@ map_object = folium.Map(
 )
 
 
-# 행정구역
-add_geojson_layer(
+# 관악구 경계
+add_layer(
     map_object,
     boundary,
     "관악구 경계",
@@ -447,7 +481,7 @@ add_geojson_layer(
 
 
 # 전체 공원
-add_geojson_layer(
+add_layer(
     map_object,
     parks,
     "전체 공원",
@@ -460,8 +494,8 @@ add_geojson_layer(
 
 if accessibility is not None:
 
-    # 15분 영역
-    add_geojson_layer(
+    # 15분 보행 영역
+    add_layer(
         map_object,
         accessibility["service_area"],
         "15분 보행 가능 영역",
@@ -485,7 +519,7 @@ if accessibility is not None:
             .drop(columns=["index_right"])
         )
 
-    add_geojson_layer(
+    add_layer(
         map_object,
         accessible_park_polygons,
         "15분 안에 접근 가능한 공원",
@@ -495,8 +529,8 @@ if accessibility is not None:
         weight=3
     )
 
-    # 접근 가능한 보행 네트워크
-    add_geojson_layer(
+    # 15분 보행 네트워크
+    add_layer(
         map_object,
         accessibility["reachable_links"],
         "15분 보행 네트워크",
@@ -510,9 +544,9 @@ if accessibility is not None:
         "reachable_parks"
     ].iterrows():
 
-        geometry = park["park_geometry"]
+        park_geometry = park["park_geometry"]
 
-        if geometry is None:
+        if park_geometry is None:
             continue
 
         distance = float(
@@ -523,8 +557,8 @@ if accessibility is not None:
 
         folium.Marker(
             location=[
-                geometry.y,
-                geometry.x
+                park_geometry.y,
+                park_geometry.x
             ],
             tooltip=park["park_name"],
             popup=(
@@ -540,12 +574,12 @@ if accessibility is not None:
         ).add_to(map_object)
 
     # 가장 가까운 공원까지의 대표 경로
-    reachable_parks = accessibility[
-        "reachable_parks"
-    ]
+    if len(accessibility["reachable_parks"]) > 0:
 
-    if len(reachable_parks) > 0:
-        nearest_park = reachable_parks.iloc[0]
+        nearest_park = (
+            accessibility["reachable_parks"]
+            .iloc[0]
+        )
 
         route = make_route(
             graph,
@@ -554,27 +588,26 @@ if accessibility is not None:
             clean_id(nearest_park["node_id"])
         )
 
-        add_geojson_layer(
+        add_layer(
             map_object,
             route,
-            "가장 가까운 공원까지의 대표 경로",
+            "가장 가까운 공원까지의 보행 경로",
             color="#d94801",
             weight=6,
             fill_opacity=0
         )
 
 
-# 건물 표시
-# 너무 많은 마커로 인한 속도 저하를 막기 위해 최대 8,000개 표시
+# 주거용 건물 표시
 building_display = buildings.head(8000)
 
-for _, row in building_display.iterrows():
+for _, building in building_display.iterrows():
 
-    point = row.geometry
+    point = building.geometry
 
     is_selected = (
         selected_building is not None
-        and row["building_id"]
+        and building["building_id"]
         == selected_building["building_id"]
     )
 
@@ -593,7 +626,7 @@ for _, row in building_display.iterrows():
     ).add_to(map_object)
 
 
-# 선택한 건물
+# 선택한 건물 표시
 if selected_building is not None:
 
     selected_point = selected_building.geometry
@@ -612,11 +645,10 @@ if selected_building is not None:
     ).add_to(map_object)
 
 
-# 레이어 컨트롤
 folium.LayerControl().add_to(map_object)
 
 
-# 지도 출력
+# 지도 표시
 map_result = st_folium(
     map_object,
     width=None,
@@ -625,18 +657,15 @@ map_result = st_folium(
 )
 
 
-# 클릭한 위치에서 가장 가까운 건물 선택
+# 지도 클릭 시 가장 가까운 건물 선택
 last_clicked = map_result.get("last_clicked")
 
 if last_clicked:
 
-    clicked_lat = last_clicked["lat"]
-    clicked_lon = last_clicked["lng"]
-
     clicked_building = find_nearest_building(
         buildings,
-        clicked_lat,
-        clicked_lon
+        last_clicked["lat"],
+        last_clicked["lng"]
     )
 
     clicked_id = clicked_building["building_id"]
@@ -646,10 +675,13 @@ if last_clicked:
         st.rerun()
 
 
-# 하단 정보
+# 하단 결과
 if selected_building is None:
 
-    st.info("지도에서 주거용 건물을 클릭해 주세요.")
+    st.info(
+        "왼쪽 메뉴에서 아파트를 선택하거나 "
+        "지도에서 건물을 클릭해 주세요."
+    )
 
 else:
 
@@ -657,7 +689,7 @@ else:
         "reachable_parks"
     ]
 
-    st.subheader("선택한 건물의 15분 생활권")
+    st.subheader("선택한 위치의 15분 생활권")
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -670,14 +702,11 @@ else:
 
         nearest = reachable_parks.iloc[0]
 
-        nearest_distance = float(
+        distance = float(
             nearest["walking_distance_m"]
         )
 
-        nearest_minutes = round(
-            nearest_distance / 75,
-            1
-        )
+        minutes = round(distance / 75, 1)
 
         col2.metric(
             "가장 가까운 공원",
@@ -685,33 +714,22 @@ else:
         )
 
         col3.metric(
-            "가장 가까운 거리",
-            f"{nearest_distance:.0f}m"
+            "보행거리",
+            f"{distance:.0f}m"
         )
 
         col4.metric(
             "예상 도보시간",
-            f"{nearest_minutes}분"
+            f"{minutes}분"
         )
 
     else:
 
-        col2.metric(
-            "가장 가까운 공원",
-            "없음"
-        )
+        col2.metric("가장 가까운 공원", "없음")
+        col3.metric("보행거리", "-")
+        col4.metric("예상 도보시간", "-")
 
-        col3.metric(
-            "가장 가까운 거리",
-            "-"
-        )
-
-        col4.metric(
-            "예상 도보시간",
-            "-"
-        )
-
-    st.subheader("접근 가능한 공원 목록")
+    st.subheader("15분 안에 갈 수 있는 공원")
 
     if len(reachable_parks) > 0:
 
@@ -739,6 +757,6 @@ else:
         )
 
     st.caption(
-        f"보행 네트워크 연결거리: "
+        f"선택한 건물에서 보행 네트워크까지의 연결거리: "
         f"{accessibility['snap_distance']:.1f}m"
     )
