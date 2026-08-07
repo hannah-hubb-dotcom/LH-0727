@@ -1,7 +1,8 @@
-streamlit>=1.32,<2
-plotly>=5.18,<7
-pandas>=2.0,<3
-openpyxl>=3.1,<4
-pyproj>=3.6,<4
-# Streamlit's server middleware is not compatible with Starlette 1.x yet.
-starlette<1
+streamlit
+folium
+streamlit-folium
+geopandas
+pandas
+networkx
+shapely
+pyogrio
