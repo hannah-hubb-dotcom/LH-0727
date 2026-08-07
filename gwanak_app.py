@@ -325,18 +325,29 @@ def calculate_accessibility(
 
     service_area = None
 
-    if len(reachable_nodes) >= 3:
-        service_area = gpd.GeoDataFrame(
-            {
-                "geometry": [
-                    reachable_nodes.geometry
-                    .unary_union
-                    .convex_hull
-                ]
-            },
-            geometry="geometry",
-            crs=4326
-        )
+if len(reachable_links) > 0:
+    # 보행 네트워크를 기준으로 15분 영역 생성
+    # 네트워크 주변 약 35m를 영역으로 표현
+    reachable_links_metric = (
+        reachable_links.to_crs(5186)
+    )
+
+    service_geometry = (
+        reachable_links_metric
+        .buffer(35)
+        .unary_union
+    )
+
+    service_area = gpd.GeoDataFrame(
+        {
+            "geometry": [service_geometry]
+        },
+        geometry="geometry",
+        crs=5186
+    ).to_crs(4326)
+
+else:
+    service_area = None
 
     park_nodes = park_nodes[
         park_nodes["node_id"].isin(
@@ -506,12 +517,28 @@ if accessibility is not None:
     )
 
     # 15분 영역과 겹치는 공원
-    accessible_park_polygons = gpd.sjoin(
-        parks,
-        accessibility["service_area"][["geometry"]],
-        how="inner",
-        predicate="intersects"
-    )
+   park_name_column = "LABEL"
+
+parks_for_display = parks.copy()
+parks_for_display["_park_name"] = (
+    parks_for_display[park_name_column]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+accessible_names = set(
+    accessibility["reachable_parks"]["park_name"]
+)
+
+accessible_park_polygons = parks_for_display[
+    parks_for_display["_park_name"].isin(accessible_names)
+].copy()
+
+accessible_park_polygons = (
+    accessible_park_polygons
+    .drop(columns=["_park_name"])
+)
 
     if "index_right" in accessible_park_polygons.columns:
         accessible_park_polygons = (
